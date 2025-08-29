@@ -96,19 +96,6 @@ export default function PaperDriftGame() {
     }
   })
 
-  const handleGameOver = useCallback(() => {
-    if (gameRefs.current.sounds.crash) gameRefs.current.sounds.crash.triggerAttackRelease("8n");
-    if (gameRefs.current.paperPlane) {
-      createParticles(gameRefs.current.paperPlane.mesh.position, 20, 0xffffff);
-    }
-    setIsGameOver(true)
-    const storedHighScore = localStorage.getItem('paperDriftHighScore') || '0';
-    if (gameStats.score > parseInt(storedHighScore)) {
-      localStorage.setItem('paperDriftHighScore', gameStats.score.toString());
-      setHighScore(gameStats.score);
-    }
-  }, [gameStats.score, createParticles])
-
   const createParticles = useCallback((position: THREE.Vector3, count: number, color: THREE.ColorRepresentation) => {
     const refs = gameRefs.current;
     if (!refs.scene) return;
@@ -129,6 +116,19 @@ export default function PaperDriftGame() {
       refs.scene.add(mesh);
     }
   }, []);
+
+  const handleGameOver = useCallback(() => {
+    if (gameRefs.current.sounds.crash) gameRefs.current.sounds.crash.triggerAttackRelease("8n");
+    if (gameRefs.current.paperPlane) {
+      createParticles(gameRefs.current.paperPlane.mesh.position, 20, 0xffffff);
+    }
+    setIsGameOver(true)
+    const storedHighScore = localStorage.getItem('paperDriftHighScore') || '0';
+    if (gameStats.score > parseInt(storedHighScore)) {
+      localStorage.setItem('paperDriftHighScore', gameStats.score.toString());
+      setHighScore(gameStats.score);
+    }
+  }, [gameStats.score, createParticles])
 
   useEffect(() => {
     const storedHighScore = localStorage.getItem('paperDriftHighScore') || '0';
