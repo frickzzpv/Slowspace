@@ -3,6 +3,10 @@ import { render, screen } from '@testing-library/react';
 import PaperDriftGame from '../PaperDriftGame';
 
 // Mock Tone.js
+jest.mock('../../hooks/use-mobile', () => ({
+  useMobile: () => false,
+}));
+
 jest.mock('tone', () => {
   return {
     Synth: jest.fn().mockImplementation(() => ({

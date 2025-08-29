@@ -4,6 +4,11 @@ import React, { useEffect, useRef, useState, useCallback } from 'react'
 import * as THREE from 'three'
 import * as CANNON from 'cannon-es'
 import * as Tone from 'tone'
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { Joystick } from 'react-joystick-component';
+import { useMobile } from '@/hooks/use-mobile';
 
 interface GameStats {
   score: number
@@ -21,6 +26,7 @@ interface DynamicObstacle {
   mesh: THREE.Mesh;
   body: CANNON.Body;
   initialPosition: THREE.Vector3;
+  dynamicType?: string;
 }
 
 interface Room {
@@ -37,6 +43,12 @@ interface CollectibleRing {
   collected: boolean
 }
 
+interface PowerUp {
+  mesh: THREE.Mesh;
+  body: CANNON.Body;
+  type: 'shield';
+}
+
 interface Particle {
   mesh: THREE.Mesh;
   velocity: THREE.Vector3;
@@ -44,11 +56,14 @@ interface Particle {
 }
 
 export default function PaperDriftGame() {
+  const isMobile = useMobile();
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [gameStarted, setGameStarted] = useState(false)
   const [isGameOver, setIsGameOver] = useState(false)
   const [highScore, setHighScore] = useState(0);
   const [planeColor, setPlaneColor] = useState(0xffffff);
+  const [hasShield, setHasShield] = useState(false);
+  const [isInvulnerable, setIsInvulnerable] = useState(false);
   const [textures, setTextures] = useState<{ [key: string]: THREE.Texture | null }>({
     wall: null,
     obstacle: null,
@@ -66,6 +81,7 @@ export default function PaperDriftGame() {
     camera: null as THREE.PerspectiveCamera | null,
     renderer: null as THREE.WebGLRenderer | null,
     world: null as CANNON.World | null,
+    effectComposer: null as EffectComposer | null,
     paperPlane: null as PaperPlane | null,
     gravityDirection: 1, // 1 for down, -1 for up
     gravityTransition: 0, // 0-1 for smooth transition
@@ -76,6 +92,7 @@ export default function PaperDriftGame() {
     },
     rooms: [] as Room[],
     collectibles: [] as CollectibleRing[],
+    powerUps: [] as PowerUp[],
     nextRoomPosition: 0,
     rng: null as (() => number) | null,
     roomTemplates: [] as any[],
@@ -93,6 +110,7 @@ export default function PaperDriftGame() {
       flip: null as Tone.Synth | null,
       collect: null as Tone.Synth | null,
       crash: null as Tone.NoiseSynth | null,
+      music: null as Tone.Pattern | null,
     }
   })
 
@@ -102,7 +120,13 @@ export default function PaperDriftGame() {
 
     for (let i = 0; i < count; i++) {
       const geometry = new THREE.BoxGeometry(0.1, 0.1, 0.1);
-      const material = new THREE.MeshStandardMaterial({ color, transparent: true, opacity: 1 });
+      const material = new THREE.MeshStandardMaterial({
+        color,
+        emissive: color,
+        emissiveIntensity: 2,
+        transparent: true,
+        opacity: 1
+      });
       const mesh = new THREE.Mesh(geometry, material);
       mesh.position.copy(position);
 
@@ -118,6 +142,16 @@ export default function PaperDriftGame() {
   }, []);
 
   const handleGameOver = useCallback(() => {
+    if (isInvulnerable) return;
+
+    if (hasShield) {
+      setHasShield(false);
+      setIsInvulnerable(true);
+      // Play shield break sound?
+      setTimeout(() => setIsInvulnerable(false), 2000); // 2 seconds of invulnerability
+      return;
+    }
+
     if (gameRefs.current.sounds.crash) gameRefs.current.sounds.crash.triggerAttackRelease("8n");
     if (gameRefs.current.paperPlane) {
       createParticles(gameRefs.current.paperPlane.mesh.position, 20, 0xffffff);
@@ -128,7 +162,7 @@ export default function PaperDriftGame() {
       localStorage.setItem('paperDriftHighScore', gameStats.score.toString());
       setHighScore(gameStats.score);
     }
-  }, [gameStats.score, createParticles])
+  }, [gameStats.score, createParticles, hasShield, isInvulnerable])
 
   useEffect(() => {
     const storedHighScore = localStorage.getItem('paperDriftHighScore') || '0';
@@ -252,6 +286,17 @@ export default function PaperDriftGame() {
           { type: 'bookshelf', position: [-9, 0, -10], size: [2, 8, 4] },
           { type: 'bookshelf', position: [9, 0, -10], size: [2, 8, 4] },
           { type: 'reading_table', position: [0, -3, -15], size: [6, 1, 3] }
+        ]
+      },
+      kitchen: {
+        width: 20,
+        height: 20,
+        depth: 30,
+        color: 0xF5F5F5,
+        obstacles: [
+          { type: 'countertop', position: [-8, -2, -10], size: [4, 2, 15] },
+          { type: 'kitchen_island', position: [0, -2, 0], size: [6, 2, 6] },
+          { type: 'spinning_fan', position: [0, 8, -20], size: [10, 0.5, 1], isDynamic: true, dynamicType: 'fan' }
         ]
       }
     }
@@ -377,7 +422,8 @@ export default function PaperDriftGame() {
         dynamicObstacles.push({
           mesh: obstacleMesh,
           body: obstacleBody,
-          initialPosition: obstacleMesh.position.clone()
+          initialPosition: obstacleMesh.position.clone(),
+          dynamicType: obstacle.dynamicType
         });
       } else {
         bodies.push(obstacleBody)
@@ -389,6 +435,8 @@ export default function PaperDriftGame() {
       const ringGeometry = new THREE.TorusGeometry(1, 0.2, 8, 16)
       const ringMaterial = new THREE.MeshStandardMaterial({
         color: 0xFFD700,
+        emissive: 0xFFD700,
+        emissiveIntensity: 1,
         transparent: true,
         opacity: 0.8,
         metalness: 0.8,
@@ -424,6 +472,40 @@ export default function PaperDriftGame() {
       })
     }
 
+    // Add shield power-up
+    if (Math.random() < 0.15) { // 15% chance
+      const shieldGeometry = new THREE.IcosahedronGeometry(0.7);
+      const shieldMaterial = new THREE.MeshStandardMaterial({
+        color: 0x00FFFF,
+        emissive: 0x00FFFF,
+        emissiveIntensity: 1.5,
+        transparent: true,
+        opacity: 0.8
+      });
+      const shieldMesh = new THREE.Mesh(shieldGeometry, shieldMaterial);
+      shieldMesh.position.set(
+        generateRandomNumber(-template.width / 4, template.width / 4),
+        generateRandomNumber(-template.height / 4, template.height / 4),
+        position + generateRandomNumber(-template.depth / 4, template.depth / 4)
+      );
+      roomGroup.add(shieldMesh);
+
+      const shieldShape = new CANNON.Sphere(1);
+      const shieldBody = new CANNON.Body({
+        mass: 0,
+        shape: shieldShape,
+        isTrigger: true, // Make it a trigger so it doesn't cause collisions
+        position: new CANNON.Vec3(shieldMesh.position.x, shieldMesh.position.y, shieldMesh.position.z)
+      });
+      refs.world.addBody(shieldBody);
+
+      refs.powerUps.push({
+        mesh: shieldMesh,
+        body: shieldBody,
+        type: 'shield'
+      });
+    }
+
     refs.scene.add(roomGroup)
 
     return {
@@ -457,7 +539,7 @@ export default function PaperDriftGame() {
 
     // Add new rooms ahead of the plane
     while (refs.nextRoomPosition < planeZ + 100) {
-      const roomTypes = ['office', 'warehouse', 'lab', 'library']
+      const roomTypes = ['office', 'warehouse', 'lab', 'library', 'kitchen']
       const randomType = roomTypes[Math.floor(Math.random() * roomTypes.length)]
       const newRoom = createRoom(refs.nextRoomPosition, randomType)
       if (newRoom) {
@@ -494,6 +576,25 @@ export default function PaperDriftGame() {
     // Remove collected collectibles from array
     refs.collectibles = refs.collectibles.filter(c => !c.collected)
   }, [createParticles])
+
+  const checkPowerUps = useCallback(() => {
+    const refs = gameRefs.current;
+    if (!refs.paperPlane) return;
+
+    for (let i = refs.powerUps.length - 1; i >= 0; i--) {
+      const powerUp = refs.powerUps[i];
+      const distance = refs.paperPlane.body.position.distanceTo(powerUp.body.position);
+      if (distance < 1.5) {
+        if (powerUp.type === 'shield') {
+          setHasShield(true);
+          // Optional: play a sound
+        }
+        refs.scene?.remove(powerUp.mesh);
+        refs.world?.removeBody(powerUp.body);
+        refs.powerUps.splice(i, 1);
+      }
+    }
+  }, []);
 
   const applyAerodynamicForces = useCallback((planeBody: CANNON.Body, deltaTime: number) => {
     const velocity = planeBody.velocity
@@ -573,6 +674,23 @@ export default function PaperDriftGame() {
       refs.sounds.collect = new Tone.Synth({ oscillator: { type: 'sine' }, envelope: { attack: 0.005, decay: 0.1, sustain: 0.3, release: 1 } }).toDestination();
       refs.sounds.crash = new Tone.NoiseSynth().toDestination();
 
+      // Initialize music
+      const musicSynth = new Tone.FMSynth({
+        harmonicity: 3,
+        modulationIndex: 10,
+        envelope: { attack: 0.1, decay: 0.2, sustain: 0.5, release: 1 },
+        modulationEnvelope: { attack: 0.1, decay: 0.2, sustain: 0.5, release: 1 }
+      }).toDestination();
+      const reverb = new Tone.Reverb(4).toDestination();
+      musicSynth.connect(reverb);
+
+      refs.sounds.music = new Tone.Pattern((time, note) => {
+        musicSynth.triggerAttackRelease(note, '8n', time);
+      }, ['C3', 'E3', 'G3', 'B3'], "randomWalk");
+      refs.sounds.music.interval = '4n';
+      Tone.Transport.bpm.value = 90;
+
+
       // Initialize camera
       refs.camera = new THREE.PerspectiveCamera(
         75,
@@ -590,6 +708,16 @@ export default function PaperDriftGame() {
       refs.renderer.setSize(window.innerWidth, window.innerHeight)
       refs.renderer.shadowMap.enabled = true
       refs.renderer.shadowMap.type = THREE.PCFSoftShadowMap
+
+      // Post-processing
+      refs.effectComposer = new EffectComposer(refs.renderer);
+      refs.effectComposer.addPass(new RenderPass(refs.scene, refs.camera));
+      const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+      bloomPass.threshold = 0;
+      bloomPass.strength = 1.2;
+      bloomPass.radius = 0;
+      refs.effectComposer.addPass(bloomPass);
+
 
       // Initialize physics world
       refs.world = new CANNON.World()
@@ -704,10 +832,11 @@ export default function PaperDriftGame() {
 
       // Handle window resize
       const handleResize = () => {
-        if (refs.camera && refs.renderer) {
+        if (refs.camera && refs.renderer && refs.effectComposer) {
           refs.camera.aspect = window.innerWidth / window.innerHeight
           refs.camera.updateProjectionMatrix()
           refs.renderer.setSize(window.innerWidth, window.innerHeight)
+          refs.effectComposer.setSize(window.innerWidth, window.innerHeight)
         }
       }
       window.addEventListener('resize', handleResize)
@@ -752,6 +881,19 @@ export default function PaperDriftGame() {
           refs.paperPlane.mesh.position.copy(refs.paperPlane.body.position as unknown as THREE.Vector3)
           refs.paperPlane.mesh.quaternion.copy(refs.paperPlane.body.quaternion as unknown as THREE.Quaternion)
 
+          // Shield visual effect
+          const planeMaterial = refs.paperPlane.mesh.material as THREE.MeshStandardMaterial;
+          if (hasShield || isInvulnerable) {
+            planeMaterial.opacity = 0.6;
+            planeMaterial.emissive.set(0x00FFFF);
+            planeMaterial.emissiveIntensity = isInvulnerable ? 2 : 1;
+          } else {
+            planeMaterial.opacity = 0.9;
+            planeMaterial.emissive.set(planeColor);
+            planeMaterial.emissiveIntensity = 0;
+          }
+
+
           // Update camera to follow plane
           refs.camera.position.lerp(
             new THREE.Vector3(
@@ -766,14 +908,22 @@ export default function PaperDriftGame() {
           // Update rooms and collectibles
           updateRooms()
           checkCollectibles()
+          checkPowerUps()
 
           // Animate dynamic obstacles
           refs.rooms.forEach(room => {
             room.dynamicObstacles.forEach(obstacle => {
-              const time = Date.now() * 0.001;
-              const newX = obstacle.initialPosition.x + Math.sin(time) * 5; // Move 5 units left/right
-              obstacle.body.position.x = newX;
-              obstacle.mesh.position.x = newX;
+              if (obstacle.dynamicType === 'fan') {
+                // Spinning fan
+                obstacle.body.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), Date.now() * 0.002);
+                obstacle.mesh.quaternion.copy(obstacle.body.quaternion as unknown as THREE.Quaternion);
+              } else {
+                // Sliding door
+                const time = Date.now() * 0.001;
+                const newX = obstacle.initialPosition.x + Math.sin(time) * 5; // Move 5 units left/right
+                obstacle.body.position.x = newX;
+                obstacle.mesh.position.x = newX;
+              }
             })
           })
 
@@ -799,8 +949,8 @@ export default function PaperDriftGame() {
           }))
         }
 
-        if (refs.renderer && refs.scene && refs.camera) {
-          refs.renderer.render(refs.scene, refs.camera)
+        if (refs.effectComposer) {
+          refs.effectComposer.render()
         }
         refs.gameLoopId = requestAnimationFrame(gameLoop)
       }
@@ -810,6 +960,13 @@ export default function PaperDriftGame() {
       // Cleanup
       return () => {
         if(refs.gameLoopId) cancelAnimationFrame(refs.gameLoopId)
+
+        Tone.Transport.stop();
+        Tone.Transport.cancel();
+        if (refs.sounds.music) {
+          refs.sounds.music.dispose();
+        }
+
         window.removeEventListener('keydown', handleKeyDown)
         window.removeEventListener('keyup', handleKeyUp)
         window.removeEventListener('click', handleClick)
@@ -821,15 +978,41 @@ export default function PaperDriftGame() {
     }
 
     initGame()
-  }, [gameStarted, applyAerodynamicForces, flipGravity, updateRooms, checkCollectibles, createRoom, handleGameOver, isGameOver, createParticles, planeColor])
+  }, [gameStarted, applyAerodynamicForces, flipGravity, updateRooms, checkCollectibles, checkPowerUps, createRoom, handleGameOver, isGameOver, createParticles, planeColor, hasShield, isInvulnerable])
 
   const resetGame = () => {
     window.location.reload();
   }
 
   const handleStartGame = () => {
-    Tone.start();
+    Tone.start().then(() => {
+      const refs = gameRefs.current;
+      if (refs.sounds.music) {
+        Tone.Transport.start();
+        refs.sounds.music.start(0);
+      }
+    });
     setGameStarted(true)
+  }
+
+  const handleJoystickMove = (e: any) => {
+    const refs = gameRefs.current;
+    if (e.x > 0.5) {
+      refs.keys.right = true;
+      refs.keys.left = false;
+    } else if (e.x < -0.5) {
+      refs.keys.left = true;
+      refs.keys.right = false;
+    } else {
+      refs.keys.left = false;
+      refs.keys.right = false;
+    }
+  }
+
+  const handleJoystickStop = () => {
+    const refs = gameRefs.current;
+    refs.keys.left = false;
+    refs.keys.right = false;
   }
 
   if (!gameStarted) {
@@ -883,6 +1066,7 @@ export default function PaperDriftGame() {
           <div>Distance: {Math.floor(gameStats.distance)}m</div>
           <div>Combo: x{gameStats.combo}</div>
           <div>Gravity: {gameStats.gravityState === 'down' ? '⬇️' : '⬆️'}</div>
+          {hasShield && <div>Shield: 🛡️</div>}
           <div className="text-xs opacity-75">FPS: {gameRefs.current.fps}</div>
         </div>
       </div>
@@ -899,6 +1083,18 @@ export default function PaperDriftGame() {
       >
         Flip
       </button>
+
+      {isMobile && !isGameOver && (
+        <div className="absolute bottom-10 left-10">
+          <Joystick
+            size={100}
+            baseColor="rgba(255, 255, 255, 0.2)"
+            stickColor="rgba(255, 255, 255, 0.5)"
+            move={handleJoystickMove}
+            stop={handleJoystickStop}
+          />
+        </div>
+      )}
 
       {isGameOver && (
         <div className="absolute inset-0 bg-black/50 backdrop-blur-sm flex flex-col items-center justify-center text-white text-center">
