@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react'
 import * as THREE from 'three'
 import * as CANNON from 'cannon-es'
+import * as Tone from 'tone'
 
 interface GameStats {
   score: number
@@ -16,9 +17,16 @@ interface PaperPlane {
   body: CANNON.Body
 }
 
+interface DynamicObstacle {
+  mesh: THREE.Mesh;
+  body: CANNON.Body;
+  initialPosition: THREE.Vector3;
+}
+
 interface Room {
   mesh: THREE.Group
   bodies: CANNON.Body[]
+  dynamicObstacles: DynamicObstacle[]
   position: number
   type: string
 }
@@ -29,9 +37,18 @@ interface CollectibleRing {
   collected: boolean
 }
 
+interface Particle {
+  mesh: THREE.Mesh;
+  velocity: THREE.Vector3;
+  lifetime: number;
+}
+
 export default function PaperDriftGame() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [gameStarted, setGameStarted] = useState(false)
+  const [isGameOver, setIsGameOver] = useState(false)
+  const [highScore, setHighScore] = useState(0);
+  const [planeColor, setPlaneColor] = useState(0xffffff);
   const [textures, setTextures] = useState<{ [key: string]: THREE.Texture | null }>({
     wall: null,
     obstacle: null,
@@ -67,10 +84,56 @@ export default function PaperDriftGame() {
     geometryPool: [] as THREE.BufferGeometry[],
     materialPool: [] as THREE.Material[],
     bodyPool: [] as CANNON.Body[],
+    particles: [] as Particle[],
     lastFrameTime: 0,
     frameCount: 0,
-    fps: 0
+    fps: 0,
+    gameLoopId: null as number | null,
+    sounds: {
+      flip: null as Tone.Synth | null,
+      collect: null as Tone.Synth | null,
+      crash: null as Tone.NoiseSynth | null,
+    }
   })
+
+  const handleGameOver = useCallback(() => {
+    if (gameRefs.current.sounds.crash) gameRefs.current.sounds.crash.triggerAttackRelease("8n");
+    if (gameRefs.current.paperPlane) {
+      createParticles(gameRefs.current.paperPlane.mesh.position, 20, 0xffffff);
+    }
+    setIsGameOver(true)
+    const storedHighScore = localStorage.getItem('paperDriftHighScore') || '0';
+    if (gameStats.score > parseInt(storedHighScore)) {
+      localStorage.setItem('paperDriftHighScore', gameStats.score.toString());
+      setHighScore(gameStats.score);
+    }
+  }, [gameStats.score, createParticles])
+
+  const createParticles = useCallback((position: THREE.Vector3, count: number, color: THREE.ColorRepresentation) => {
+    const refs = gameRefs.current;
+    if (!refs.scene) return;
+
+    for (let i = 0; i < count; i++) {
+      const geometry = new THREE.BoxGeometry(0.1, 0.1, 0.1);
+      const material = new THREE.MeshStandardMaterial({ color, transparent: true, opacity: 1 });
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.position.copy(position);
+
+      const velocity = new THREE.Vector3(
+        (Math.random() - 0.5) * 2,
+        (Math.random() - 0.5) * 2,
+        (Math.random() - 0.5) * 2
+      );
+
+      refs.particles.push({ mesh, velocity, lifetime: 1 });
+      refs.scene.add(mesh);
+    }
+  }, []);
+
+  useEffect(() => {
+    const storedHighScore = localStorage.getItem('paperDriftHighScore') || '0';
+    setHighScore(parseInt(storedHighScore));
+  }, []);
 
   const generateRandomNumber = useCallback((min: number, max: number) => {
     return Math.random() * (max - min) + min
@@ -165,7 +228,8 @@ export default function PaperDriftGame() {
         obstacles: [
           { type: 'crate', position: [-6, 0, -10], size: [2, 2, 2] },
           { type: 'crate', position: [6, 0, -10], size: [2, 2, 2] },
-          { type: 'crate', position: [0, 0, -15], size: [3, 3, 3] }
+          { type: 'crate', position: [0, 0, -15], size: [3, 3, 3] },
+          { type: 'sliding_door', position: [0, 0, -25], size: [8, 8, 0.5], isDynamic: true }
         ]
       },
       lab: {
@@ -177,6 +241,17 @@ export default function PaperDriftGame() {
           { type: 'table', position: [0, 0, -5], size: [4, 1, 2] },
           { type: 'machine', position: [-7, 0, -10], size: [2, 4, 2] },
           { type: 'machine', position: [7, 0, -10], size: [2, 4, 2] }
+        ]
+      },
+      library: {
+        width: 22,
+        height: 22,
+        depth: 35,
+        color: 0xD2B48C,
+        obstacles: [
+          { type: 'bookshelf', position: [-9, 0, -10], size: [2, 8, 4] },
+          { type: 'bookshelf', position: [9, 0, -10], size: [2, 8, 4] },
+          { type: 'reading_table', position: [0, -3, -15], size: [6, 1, 3] }
         ]
       }
     }
@@ -191,6 +266,7 @@ export default function PaperDriftGame() {
     const template = createRoomTemplate(type)
     const roomGroup = new THREE.Group()
     const bodies: CANNON.Body[] = []
+    const dynamicObstacles: DynamicObstacle[] = []
 
     // Create floor
     const floorGeometry = new THREE.PlaneGeometry(template.width, template.depth)
@@ -286,7 +362,8 @@ export default function PaperDriftGame() {
         obstacle.size[2] / 2
       ))
       const obstacleBody = new CANNON.Body({
-        mass: 0,
+        mass: obstacle.isDynamic ? 1 : 0, // Dynamic obstacles need mass to be moved by forces if needed, but we'll move them kinematically
+        type: obstacle.isDynamic ? CANNON.Body.KINEMATIC : CANNON.Body.STATIC,
         shape: obstacleShape,
         position: new CANNON.Vec3(
           obstacle.position[0],
@@ -295,7 +372,16 @@ export default function PaperDriftGame() {
         )
       })
       refs.world.addBody(obstacleBody)
-      bodies.push(obstacleBody)
+
+      if (obstacle.isDynamic) {
+        dynamicObstacles.push({
+          mesh: obstacleMesh,
+          body: obstacleBody,
+          initialPosition: obstacleMesh.position.clone()
+        });
+      } else {
+        bodies.push(obstacleBody)
+      }
     })
 
     // Add collectible rings
@@ -343,6 +429,7 @@ export default function PaperDriftGame() {
     return {
       mesh: roomGroup,
       bodies,
+      dynamicObstacles,
       position,
       type
     }
@@ -370,7 +457,7 @@ export default function PaperDriftGame() {
 
     // Add new rooms ahead of the plane
     while (refs.nextRoomPosition < planeZ + 100) {
-      const roomTypes = ['office', 'warehouse', 'lab']
+      const roomTypes = ['office', 'warehouse', 'lab', 'library']
       const randomType = roomTypes[Math.floor(Math.random() * roomTypes.length)]
       const newRoom = createRoom(refs.nextRoomPosition, randomType)
       if (newRoom) {
@@ -388,6 +475,8 @@ export default function PaperDriftGame() {
       if (!collectible.collected) {
         const distance = refs.paperPlane!.body.position.distanceTo(collectible.body.position)
         if (distance < 2) {
+          if (refs.sounds.collect) refs.sounds.collect.triggerAttackRelease("C5", "8n");
+          createParticles(collectible.mesh.position, 10, 0xFFD700);
           collectible.collected = true
           refs.scene!.remove(collectible.mesh)
           refs.world!.removeBody(collectible.body)
@@ -404,11 +493,17 @@ export default function PaperDriftGame() {
 
     // Remove collected collectibles from array
     refs.collectibles = refs.collectibles.filter(c => !c.collected)
-  }, [])
+  }, [createParticles])
 
   const applyAerodynamicForces = useCallback((planeBody: CANNON.Body, deltaTime: number) => {
     const velocity = planeBody.velocity
     const speed = velocity.length()
+
+    // Add a forward propulsion force that increases with distance
+    const basePropulsion = 1; // Base forward force
+    const difficultyMultiplier = 1 + Math.floor(gameStats.distance / 100) * 0.1; // Increases by 10% every 100m
+    const propulsionForce = new CANNON.Vec3(0, 0, -basePropulsion * difficultyMultiplier);
+    planeBody.applyForce(propulsionForce, planeBody.position);
 
     if (speed > 0.1) {
       // Calculate lift force (perpendicular to velocity)
@@ -419,8 +514,8 @@ export default function PaperDriftGame() {
       // Apply lift
       planeBody.applyForce(liftForce, planeBody.position)
 
-      // Apply drag (opposite to velocity)
-      const dragMagnitude = speed * speed * 0.01
+      // Apply drag (opposite to velocity) - increased drag to compensate for propulsion
+      const dragMagnitude = speed * speed * 0.015
       const dragForce = velocity.scale(-dragMagnitude / speed)
       planeBody.applyForce(dragForce, planeBody.position)
 
@@ -432,11 +527,12 @@ export default function PaperDriftGame() {
         planeBody.applyTorque(new CANNON.Vec3(0, 0, -0.3))
       }
     }
-  }, [])
+  }, [gameStats.distance])
 
   const flipGravity = useCallback(() => {
     const refs = gameRefs.current
     if (!refs.isTransitioning && refs.world) {
+      if (refs.sounds.flip) refs.sounds.flip.triggerAttackRelease("C3", "8n", Tone.now());
       refs.isTransitioning = true
       refs.gravityDirection *= -1
       refs.gravityTransition = 0
@@ -452,6 +548,7 @@ export default function PaperDriftGame() {
     if (!canvasRef.current || !gameStarted) return
 
     const initGame = async () => {
+      if (gameRefs.current.scene) return; // Prevent re-initialization
       const refs = gameRefs.current
 
       // Load textures
@@ -470,6 +567,11 @@ export default function PaperDriftGame() {
       // Initialize Three.js scene
       refs.scene = new THREE.Scene()
       refs.scene.fog = new THREE.Fog(0x87CEEB, 10, 100)
+
+      // Initialize sounds
+      refs.sounds.flip = new Tone.Synth().toDestination();
+      refs.sounds.collect = new Tone.Synth({ oscillator: { type: 'sine' }, envelope: { attack: 0.005, decay: 0.1, sustain: 0.3, release: 1 } }).toDestination();
+      refs.sounds.crash = new Tone.NoiseSynth().toDestination();
 
       // Initialize camera
       refs.camera = new THREE.PerspectiveCamera(
@@ -517,7 +619,7 @@ export default function PaperDriftGame() {
         // Paper plane geometry
         const geometry = new THREE.ConeGeometry(0.5, 2, 8)
         const material = new THREE.MeshStandardMaterial({
-          color: 0xffffff,
+          color: planeColor,
           transparent: true,
           opacity: 0.9,
           roughness: 0.5,
@@ -541,6 +643,7 @@ export default function PaperDriftGame() {
             restitution: 0.1
           })
         })
+        planeBody.addEventListener('collide', handleGameOver)
         refs.world!.addBody(planeBody)
 
         return { mesh: planeMesh, body: planeBody }
@@ -664,6 +767,31 @@ export default function PaperDriftGame() {
           updateRooms()
           checkCollectibles()
 
+          // Animate dynamic obstacles
+          refs.rooms.forEach(room => {
+            room.dynamicObstacles.forEach(obstacle => {
+              const time = Date.now() * 0.001;
+              const newX = obstacle.initialPosition.x + Math.sin(time) * 5; // Move 5 units left/right
+              obstacle.body.position.x = newX;
+              obstacle.mesh.position.x = newX;
+            })
+          })
+
+          // Update particles
+          for (let i = refs.particles.length - 1; i >= 0; i--) {
+            const particle = refs.particles[i];
+            particle.lifetime -= deltaTime;
+            if (particle.lifetime <= 0) {
+              refs.scene?.remove(particle.mesh);
+              particle.mesh.geometry.dispose();
+              (particle.mesh.material as THREE.Material).dispose();
+              refs.particles.splice(i, 1);
+            } else {
+              particle.mesh.position.add(particle.velocity.clone().multiplyScalar(deltaTime));
+              (particle.mesh.material as THREE.MeshStandardMaterial).opacity = particle.lifetime;
+            }
+          }
+
           // Update game stats
           setGameStats(prev => ({
             ...prev,
@@ -674,13 +802,14 @@ export default function PaperDriftGame() {
         if (refs.renderer && refs.scene && refs.camera) {
           refs.renderer.render(refs.scene, refs.camera)
         }
-        requestAnimationFrame(gameLoop)
+        refs.gameLoopId = requestAnimationFrame(gameLoop)
       }
 
-      requestAnimationFrame(gameLoop)
+      refs.gameLoopId = requestAnimationFrame(gameLoop)
 
       // Cleanup
       return () => {
+        if(refs.gameLoopId) cancelAnimationFrame(refs.gameLoopId)
         window.removeEventListener('keydown', handleKeyDown)
         window.removeEventListener('keyup', handleKeyUp)
         window.removeEventListener('click', handleClick)
@@ -692,9 +821,14 @@ export default function PaperDriftGame() {
     }
 
     initGame()
-  }, [gameStarted, applyAerodynamicForces, flipGravity, updateRooms, checkCollectibles, createRoom])
+  }, [gameStarted, applyAerodynamicForces, flipGravity, updateRooms, checkCollectibles, createRoom, handleGameOver, isGameOver, createParticles, planeColor])
+
+  const resetGame = () => {
+    window.location.reload();
+  }
 
   const handleStartGame = () => {
+    Tone.start();
     setGameStarted(true)
   }
 
@@ -711,6 +845,15 @@ export default function PaperDriftGame() {
             <div className="space-y-1 text-white/90">
               <p>🖱️ Click/Tap or Space: Flip Gravity</p>
               <p>⬅️➡️ Arrow Keys or A/D: Steer</p>
+            </div>
+          </div>
+          <div className="inline-block bg-white/10 p-4 rounded-lg border border-white/20 backdrop-blur-sm">
+            <h2 className="text-2xl font-semibold mb-2">Plane Color</h2>
+            <div className="flex justify-center gap-x-2">
+              <button onClick={() => setPlaneColor(0xffffff)} className="w-8 h-8 rounded-full bg-white border-2 border-white/50"></button>
+              <button onClick={() => setPlaneColor(0xff0000)} className="w-8 h-8 rounded-full bg-red-500 border-2 border-white/50"></button>
+              <button onClick={() => setPlaneColor(0x00ff00)} className="w-8 h-8 rounded-full bg-green-500 border-2 border-white/50"></button>
+              <button onClick={() => setPlaneColor(0x0000ff)} className="w-8 h-8 rounded-full bg-blue-500 border-2 border-white/50"></button>
             </div>
           </div>
           <div>
@@ -756,6 +899,28 @@ export default function PaperDriftGame() {
       >
         Flip
       </button>
+
+      {isGameOver && (
+        <div className="absolute inset-0 bg-black/50 backdrop-blur-sm flex flex-col items-center justify-center text-white text-center">
+          <h2 className="text-6xl font-bold mb-4 [text-shadow:0_4px_8px_rgba(0,0,0,0.5)]">Game Over</h2>
+          <div className="bg-white/10 p-6 rounded-lg border border-white/20 space-y-4">
+            <div className="text-2xl">
+              <p className="text-white/80">Score</p>
+              <p className="font-bold text-4xl">{gameStats.score}</p>
+            </div>
+            <div className="text-2xl">
+              <p className="text-white/80">High Score</p>
+              <p className="font-bold text-4xl">{highScore}</p>
+            </div>
+          </div>
+          <button
+            onClick={resetGame}
+            className="mt-8 px-10 py-4 bg-white/90 text-gray-900 font-bold text-xl rounded-lg hover:bg-white transition-all scale-100 hover:scale-105"
+          >
+            Play Again
+          </button>
+        </div>
+      )}
     </div>
   )
 }
