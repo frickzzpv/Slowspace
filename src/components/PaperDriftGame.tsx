@@ -32,6 +32,10 @@ interface CollectibleRing {
 export default function PaperDriftGame() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [gameStarted, setGameStarted] = useState(false)
+  const [textures, setTextures] = useState<{ [key: string]: THREE.Texture | null }>({
+    wall: null,
+    obstacle: null,
+  });
   const [gameStats, setGameStats] = useState<GameStats>({
     score: 0,
     distance: 0,
@@ -115,7 +119,7 @@ export default function PaperDriftGame() {
     for (let i = 0; i < refs.materialPool.length; i++) {
       const mat = refs.materialPool[i]
       if (!mat.userData.inUse &&
-          (mat as THREE.MeshLambertMaterial).color.getHex() === color &&
+          (mat as THREE.MeshStandardMaterial).color.getHex() === color &&
           mat.transparent === transparent &&
           mat.opacity === opacity) {
         mat.userData.inUse = true
@@ -124,10 +128,12 @@ export default function PaperDriftGame() {
     }
 
     // Create new material if none available
-    const newMaterial = new THREE.MeshLambertMaterial({
+    const newMaterial = new THREE.MeshStandardMaterial({
       color,
       transparent,
-      opacity
+      opacity,
+      roughness: 0.8,
+      metalness: 0.2
     })
     newMaterial.userData = { inUse: true }
     refs.materialPool.push(newMaterial)
@@ -188,7 +194,7 @@ export default function PaperDriftGame() {
 
     // Create floor
     const floorGeometry = new THREE.PlaneGeometry(template.width, template.depth)
-    const floorMaterial = new THREE.MeshLambertMaterial({ color: template.color })
+    const floorMaterial = new THREE.MeshStandardMaterial({ map: textures.wall, roughness: 0.9, metalness: 0.1 })
     const floor = new THREE.Mesh(floorGeometry, floorMaterial)
     floor.rotation.x = -Math.PI / 2
     floor.position.y = -template.height / 2
@@ -207,7 +213,7 @@ export default function PaperDriftGame() {
 
     // Create ceiling
     const ceilingGeometry = new THREE.PlaneGeometry(template.width, template.depth)
-    const ceilingMaterial = new THREE.MeshLambertMaterial({ color: template.color })
+    const ceilingMaterial = new THREE.MeshStandardMaterial({ map: textures.wall, roughness: 0.9, metalness: 0.1 })
     const ceiling = new THREE.Mesh(ceilingGeometry, ceilingMaterial)
     ceiling.rotation.x = Math.PI / 2
     ceiling.position.y = template.height / 2
@@ -225,7 +231,7 @@ export default function PaperDriftGame() {
     bodies.push(ceilingBody)
 
     // Create walls
-    const wallMaterial = new THREE.MeshLambertMaterial({ color: template.color })
+    const wallMaterial = new THREE.MeshStandardMaterial({ map: textures.wall, roughness: 0.9, metalness: 0.1 })
 
     // Left wall
     const leftWallGeometry = new THREE.PlaneGeometry(template.depth, template.height)
@@ -266,7 +272,7 @@ export default function PaperDriftGame() {
     // Add obstacles
     template.obstacles.forEach((obstacle: any) => {
       const obstacleGeometry = new THREE.BoxGeometry(...obstacle.size)
-      const obstacleMaterial = new THREE.MeshLambertMaterial({ color: 0x8B4513 })
+      const obstacleMaterial = new THREE.MeshStandardMaterial({ map: textures.obstacle, roughness: 0.7, metalness: 0.2 })
       const obstacleMesh = new THREE.Mesh(obstacleGeometry, obstacleMaterial)
       obstacleMesh.position.set(...obstacle.position)
       obstacleMesh.position.z += position
@@ -295,10 +301,12 @@ export default function PaperDriftGame() {
     // Add collectible rings
     if (Math.random() > 0.3) { // 70% chance of having a ring
       const ringGeometry = new THREE.TorusGeometry(1, 0.2, 8, 16)
-      const ringMaterial = new THREE.MeshLambertMaterial({
+      const ringMaterial = new THREE.MeshStandardMaterial({
         color: 0xFFD700,
         transparent: true,
-        opacity: 0.8
+        opacity: 0.8,
+        metalness: 0.8,
+        roughness: 0.2
       })
       const ringMesh = new THREE.Mesh(ringGeometry, ringMaterial)
       ringMesh.position.set(
@@ -338,7 +346,7 @@ export default function PaperDriftGame() {
       position,
       type
     }
-  }, [createRoomTemplate, generateRandomNumber])
+  }, [createRoomTemplate, generateRandomNumber, textures])
 
   const updateRooms = useCallback(() => {
     const refs = gameRefs.current
@@ -418,10 +426,10 @@ export default function PaperDriftGame() {
 
       // Apply steering forces
       if (gameRefs.current.keys.left) {
-        planeBody.applyTorque(new CANNON.Vec3(0, 0, 0.5))
+        planeBody.applyTorque(new CANNON.Vec3(0, 0, 0.3))
       }
       if (gameRefs.current.keys.right) {
-        planeBody.applyTorque(new CANNON.Vec3(0, 0, -0.5))
+        planeBody.applyTorque(new CANNON.Vec3(0, 0, -0.3))
       }
     }
   }, [])
@@ -445,6 +453,19 @@ export default function PaperDriftGame() {
 
     const initGame = async () => {
       const refs = gameRefs.current
+
+      // Load textures
+      const textureLoader = new THREE.TextureLoader()
+      const wallTexture = await textureLoader.loadAsync('https://cc0-textures.com/thumbs/st/american_oak_1-4K.png');
+      const obstacleTexture = await textureLoader.loadAsync('https://cc0-textures.com/thumbs/th/brown_planks_08.png');
+
+      wallTexture.wrapS = wallTexture.wrapT = THREE.RepeatWrapping;
+      obstacleTexture.wrapS = obstacleTexture.wrapT = THREE.RepeatWrapping;
+
+      setTextures({
+        wall: wallTexture,
+        obstacle: obstacleTexture,
+      });
 
       // Initialize Three.js scene
       refs.scene = new THREE.Scene()
@@ -475,28 +496,32 @@ export default function PaperDriftGame() {
       refs.world.solver.iterations = 10
 
       // Lighting
-      const ambientLight = new THREE.AmbientLight(0x404040, 0.6)
-      refs.scene.add(ambientLight)
+      const hemisphereLight = new THREE.HemisphereLight(0xB1E1FF, 0xB97A20, 0.8)
+      refs.scene.add(hemisphereLight)
 
-      const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8)
-      directionalLight.position.set(10, 10, 5)
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 1.5)
+      directionalLight.position.set(10, 20, 5)
       directionalLight.castShadow = true
-      directionalLight.shadow.camera.near = 0.1
+      directionalLight.shadow.mapSize.width = 1024
+      directionalLight.shadow.mapSize.height = 1024
+      directionalLight.shadow.camera.near = 0.5
       directionalLight.shadow.camera.far = 50
-      directionalLight.shadow.camera.left = -20
-      directionalLight.shadow.camera.right = 20
-      directionalLight.shadow.camera.top = 20
-      directionalLight.shadow.camera.bottom = -20
+      directionalLight.shadow.camera.left = -25
+      directionalLight.shadow.camera.right = 25
+      directionalLight.shadow.camera.top = 25
+      directionalLight.shadow.camera.bottom = -25
       refs.scene.add(directionalLight)
 
       // Create paper plane
       const createPaperPlane = () => {
         // Paper plane geometry
         const geometry = new THREE.ConeGeometry(0.5, 2, 8)
-        const material = new THREE.MeshLambertMaterial({
+        const material = new THREE.MeshStandardMaterial({
           color: 0xffffff,
           transparent: true,
-          opacity: 0.9
+          opacity: 0.9,
+          roughness: 0.5,
+          metalness: 0.5
         })
         const planeMesh = new THREE.Mesh(geometry, material)
         planeMesh.rotation.z = Math.PI / 2
@@ -631,7 +656,7 @@ export default function PaperDriftGame() {
               refs.paperPlane.body.position.y + 5,
               refs.paperPlane.body.position.z + 10
             ),
-            0.1
+            0.05
           )
           refs.camera.lookAt(refs.paperPlane.body.position)
 
@@ -675,24 +700,28 @@ export default function PaperDriftGame() {
 
   if (!gameStarted) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-b from-blue-400 to-blue-600 text-white">
-        <h1 className="text-6xl font-bold mb-4">Paper Drift: Gravity Flip</h1>
-        <p className="text-xl mb-8 text-center max-w-2xl">
-          Control a paper plane through endless rooms. Flip gravity to navigate through obstacles and collect rings!
-        </p>
-        <div className="mb-8 text-center">
-          <h2 className="text-2xl font-semibold mb-4">Controls</h2>
-          <div className="space-y-2">
-            <p>🖱️ Click/Tap or Space: Flip Gravity</p>
-            <p>⬅️➡️ Arrow Keys or A/D: Steer</p>
+      <div className="flex flex-col items-center justify-center min-h-screen bg-gray-900 text-white [text-shadow:0_2px_4px_rgba(0,0,0,0.5)]">
+        <div className="text-center space-y-6">
+          <h1 className="text-6xl font-bold tracking-tighter">Paper Drift: Gravity Flip</h1>
+          <p className="text-xl text-white/80 max-w-2xl">
+            Control a paper plane through endless rooms. Flip gravity to navigate obstacles and collect rings.
+          </p>
+          <div className="inline-block bg-white/10 p-4 rounded-lg border border-white/20 backdrop-blur-sm">
+            <h2 className="text-2xl font-semibold mb-2">Controls</h2>
+            <div className="space-y-1 text-white/90">
+              <p>🖱️ Click/Tap or Space: Flip Gravity</p>
+              <p>⬅️➡️ Arrow Keys or A/D: Steer</p>
+            </div>
+          </div>
+          <div>
+            <button
+              onClick={handleStartGame}
+              className="px-10 py-4 bg-white/90 text-gray-900 font-bold text-xl rounded-lg hover:bg-white transition-all scale-100 hover:scale-105"
+            >
+              Start Game
+            </button>
           </div>
         </div>
-        <button
-          onClick={handleStartGame}
-          className="px-8 py-4 bg-white text-blue-600 font-bold text-xl rounded-lg hover:bg-blue-100 transition-colors"
-        >
-          Start Game
-        </button>
       </div>
     )
   }
@@ -705,8 +734,8 @@ export default function PaperDriftGame() {
       />
 
       {/* HUD */}
-      <div className="absolute top-4 left-4 bg-black bg-opacity-50 text-white p-4 rounded-lg">
-        <div className="space-y-2">
+      <div className="absolute top-4 left-4 text-white font-bold text-lg [text-shadow:0_2px_4px_rgba(0,0,0,0.5)]">
+        <div className="space-y-1">
           <div>Score: {gameStats.score}</div>
           <div>Distance: {Math.floor(gameStats.distance)}m</div>
           <div>Combo: x{gameStats.combo}</div>
@@ -716,16 +745,16 @@ export default function PaperDriftGame() {
       </div>
 
       {/* Controls hint */}
-      <div className="absolute bottom-4 left-4 bg-black bg-opacity-50 text-white p-2 rounded-lg text-sm">
+      <div className="absolute bottom-4 left-4 text-white font-semibold text-sm [text-shadow:0_2px_4px_rgba(0,0,0,0.5)]">
         Click/Space: Flip Gravity | Arrows: Steer
       </div>
 
       {/* Gravity flip button for mobile */}
       <button
         onClick={flipGravity}
-        className="absolute bottom-4 right-4 bg-white bg-opacity-80 text-blue-600 p-4 rounded-full font-bold text-lg hover:bg-opacity-100 transition-all"
+        className="absolute bottom-4 right-4 bg-white/20 backdrop-blur-sm border border-white/30 text-white p-4 rounded-full font-bold text-lg hover:bg-white/30 transition-all"
       >
-        Flip Gravity
+        Flip
       </button>
     </div>
   )
