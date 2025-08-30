@@ -72,6 +72,63 @@ npm start
 
 Open [http://localhost:3000](http://localhost:3000) to see your application running.
 
+## 🚀 Deployment
+
+This application is designed to be deployed on a platform that supports long-running Node.js processes (e.g., VPS, Heroku, Render, AWS EC2/ECS), as it uses a custom server (`server.ts`).
+
+### 1. Environment Variables
+
+Create a `.env` file in your project root or set these environment variables in your deployment platform's dashboard:
+
+```bash
+# The connection string for your production database
+DATABASE_URL="postgresql://user:password@host:port/database"
+
+# A secret for NextAuth.js to sign tokens. Generate one with: openssl rand -hex 32
+NEXTAUTH_SECRET="your-super-secret-key"
+
+# The public URL of your deployed application
+NEXTAUTH_URL="https://your-domain.com"
+
+# Set the environment to production
+NODE_ENV="production"
+```
+
+### 2. Build and Start
+
+The deployment process involves three main steps: building the application, applying database migrations, and starting the server.
+
+1.  **Install Dependencies:**
+    ```bash
+    npm install --omit=dev
+    ```
+
+2.  **Run Database Migrations:**
+    This command applies any pending migrations to your production database. It should be run as part of your deployment pipeline before starting the server.
+    ```bash
+    npx prisma migrate deploy
+    ```
+
+3.  **Build the Application:**
+    This command creates an optimized production build of the Next.js application.
+    ```bash
+    npm run build
+    ```
+
+4.  **Start the Production Server:**
+    This command starts the custom server.
+    ```bash
+    npm run start
+    ```
+
+### Example Deployment on Render
+
+For a platform like [Render](https://render.com/), you would configure the following in your service settings:
+
+-   **Build Command:** `npm install --omit=dev && npx prisma migrate deploy && npm run build`
+-   **Start Command:** `npm run start`
+-   **Environment Variables:** Add the variables listed above in the "Environment" section of your Render dashboard.
+
 ## 🤖 Powered by Z.ai
 
 This scaffold is optimized for use with [Z.ai](https://chat.z.ai) - your AI assistant for:
