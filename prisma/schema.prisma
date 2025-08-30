@@ -21,12 +21,9 @@ model User {
   updatedAt DateTime @updatedAt
 }
 
-model Post {
+model Score {
   id        String   @id @default(cuid())
-  title     String
-  content   String?
-  published Boolean  @default(false)
-  authorId  String
+  playerName String
+  score     Int
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
 }
